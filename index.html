@@ -63,7 +63,7 @@
     .neko-chip { margin-top: 8px; display: inline-flex; align-items: center; gap: 6px; font: 600 10px/1 'JetBrains Mono', monospace; letter-spacing: .08em; color: #fff; background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.3); padding: 4px 9px; border-radius: 9999px; }
     .neko-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--neko-c); box-shadow: 0 0 6px var(--neko-c); }
 
-    @keyframes neko-float { 0%,100% { translate: 0 0; } 50% { translate: 0 -6px; } }
+    @keyframes neko-float { 0%,100% { translate: 0 0; } 50% { translate: 0 -10px; } }
     @keyframes neko-talk  { 0%,100% { scale: 1; } 50% { scale: 1.035; } }
     @keyframes neko-hop   { 0%,100% { scale: 1; } 50% { scale: 1.1; } }
     @keyframes neko-shake { 0%,100% { rotate: 0deg; } 25% { rotate: -3deg; } 75% { rotate: 3deg; } }
@@ -78,7 +78,7 @@
       100% { filter: none; translate: 0 0; }
     }
     @media (prefers-reduced-motion: reduce) {
-      .neko-rig, .neko-rig *, .neko-halo-2, .neko-scan::after { animation: none !important; transition: none !important; }
+      html:not(.neko-motion) .neko-rig, html:not(.neko-motion) .neko-rig *, html:not(.neko-motion) .neko-halo-2, html:not(.neko-motion) .neko-scan::after { animation: none !important; transition: none !important; }
     }
 
 
@@ -5880,7 +5880,11 @@ You MUST respond ONLY with a raw, valid JSON object matching this schema:
       const speech = document.getElementById('mascot-speech');
       if (!btn || !speech) return;
       const rig = btn.parentElement;
-      const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const osReduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      let forceMotion = false;
+      try { forceMotion = localStorage.getItem('chef_neko_motion_v1') === 'on'; } catch (e) {}
+      if (forceMotion) document.documentElement.classList.add('neko-motion');
+      const reduce = osReduce && !forceMotion;
       const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 
       // --- build halo, scan layer and status chip ---
@@ -6072,7 +6076,11 @@ You MUST respond ONLY with a raw, valid JSON object matching this schema:
       const speech = document.getElementById('mascot-speech');
       const srcImg = btn && btn.querySelector('img');
       if (!rig || !chip || !btn || !speech || !srcImg) return;
-      const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const osReduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      let forceMotion = false;
+      try { forceMotion = localStorage.getItem('chef_neko_motion_v1') === 'on'; } catch (e) {}
+      if (forceMotion) document.documentElement.classList.add('neko-motion');
+      const reduce = osReduce && !forceMotion;
       const store = {
         get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
         set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -6081,40 +6089,53 @@ You MUST respond ONLY with a raw, valid JSON object matching this schema:
       // =====================  SOUND (Web Audio, no files)  =====================
       let soundOn = store.get('chef_neko_sound_v1', 'on') !== 'off';
       let ctx = null, master = null;
+      let unlocked = false;
       function ensureCtx() {
         if (!ctx) {
           const AC = window.AudioContext || window.webkitAudioContext;
           if (!AC) return null;
           ctx = new AC();
           master = ctx.createGain();
-          master.gain.value = 0.35;
+          master.gain.value = 0.5;
           master.connect(ctx.destination);
         }
-        if (ctx.state === 'suspended') ctx.resume();
+        if (ctx.state !== 'running' && ctx.resume) { try { ctx.resume(); } catch (e) {} }
+        if (!unlocked) { // iOS/Safari: play a silent buffer inside a user gesture to unlock audio
+          unlocked = true;
+          try {
+            const buf = ctx.createBuffer(1, 1, 22050);
+            const src = ctx.createBufferSource();
+            src.buffer = buf; src.connect(ctx.destination); src.start(0);
+          } catch (e) {}
+        }
         return ctx;
       }
-      ['pointerdown', 'keydown'].forEach(ev => window.addEventListener(ev, () => { if (soundOn) ensureCtx(); }, { passive: true }));
+      ['pointerdown', 'touchend', 'click', 'keydown'].forEach(ev => window.addEventListener(ev, () => { if (soundOn) ensureCtx(); }, { passive: true }));
 
       function tone(o) {
-        if (!soundOn || !ctx || ctx.state !== 'running' || document.hidden) return;
-        const f = o.f || 440, dur = o.dur || 0.12, vol = o.vol || 0.15;
-        const t = ctx.currentTime + (o.delay || 0);
-        const osc = ctx.createOscillator();
-        const g = ctx.createGain();
-        osc.type = o.type || 'sine';
-        osc.frequency.setValueAtTime(f, t);
-        if (o.f2) osc.frequency.exponentialRampToValueAtTime(o.f2, t + dur);
-        g.gain.setValueAtTime(0.0001, t);
-        g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-        if (o.filter) {
-          const bp = ctx.createBiquadFilter();
-          bp.type = 'bandpass'; bp.frequency.value = o.filter; bp.Q.value = 2;
-          osc.connect(bp); bp.connect(g);
-        } else osc.connect(g);
-        g.connect(master);
-        osc.start(t);
-        osc.stop(t + dur + 0.03);
+        if (!soundOn || !ctx || document.hidden) return;
+        const play = () => {
+          const f = o.f || 440, dur = o.dur || 0.12, vol = o.vol || 0.15;
+          const t = ctx.currentTime + (o.delay || 0);
+          const osc = ctx.createOscillator();
+          const g = ctx.createGain();
+          osc.type = o.type || 'sine';
+          osc.frequency.setValueAtTime(f, t);
+          if (o.f2) osc.frequency.exponentialRampToValueAtTime(o.f2, t + dur);
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(vol, t + 0.012);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+          if (o.filter) {
+            const bp = ctx.createBiquadFilter();
+            bp.type = 'bandpass'; bp.frequency.value = o.filter; bp.Q.value = 2;
+            osc.connect(bp); bp.connect(g);
+          } else osc.connect(g);
+          g.connect(master);
+          osc.start(t);
+          osc.stop(t + dur + 0.03);
+        };
+        if (ctx.state === 'running') play();
+        else if (ctx.resume) { ctx.resume().then(() => { if (ctx.state === 'running') play(); }).catch(() => {}); }
       }
       let lastMeow = 0, lastChirp = 0;
       const SFX = {
@@ -6140,6 +6161,13 @@ You MUST respond ONLY with a raw, valid JSON object matching this schema:
       const soundBtn = mkBtn('🔊', 'Toggle Chef Neko sounds');
       const roamBtn = mkBtn('🐾', 'Let Chef Neko roam the page');
       chip.append(soundBtn, roamBtn);
+      if (osReduce) {
+        const motionBtn = mkBtn('🎞️', 'Chef Neko animations (your device has Reduce Motion on) – tap to switch');
+        motionBtn.setAttribute('aria-pressed', String(forceMotion));
+        motionBtn.addEventListener('click', e => { e.stopPropagation(); store.set('chef_neko_motion_v1', forceMotion ? 'off' : 'on'); location.reload(); });
+        chip.append(motionBtn);
+      }
+      if (reduce) roamBtn.style.display = 'none';
       function paintSound() { soundBtn.textContent = soundOn ? '🔊' : '🔇'; soundBtn.setAttribute('aria-pressed', String(soundOn)); }
       paintSound();
       soundBtn.addEventListener('click', e => {
